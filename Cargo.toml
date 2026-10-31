@@ -1,0 +1,11 @@
+[package]
+name = "graduate"
+version = "0.1.0"
+edition = "2024"
+repository = "https://github.com/naatebarber/graduate"
+homepage = "https://github.com/naatebarber/graduate"
+license = "MIT OR Apache-2.0"
+description = "Small autograd framework"
+readme = "README.md"
+
+[dependencies]
