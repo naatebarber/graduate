@@ -11,17 +11,22 @@ pub trait Backend: Clone + 'static {
     fn zeros(shape: impl IntoShape) -> Self::Storage;
     fn ones(shape: impl IntoShape) -> Self::Storage;
     fn randn(shape: impl IntoShape) -> Self::Storage;
-    fn randu(shape: impl IntoShape) -> Self::Storage;
-    fn id(a: &Self::Storage) -> usize;
     fn shape(a: &Self::Storage) -> &[usize];
     fn add(a: &Self::Storage, b: &Self::Storage) -> Self::Storage;
     fn sub(a: &Self::Storage, b: &Self::Storage) -> Self::Storage;
     fn mul(a: &Self::Storage, b: &Self::Storage) -> Self::Storage;
     fn div(a: &Self::Storage, b: &Self::Storage) -> Self::Storage;
     fn matmul(a: &Self::Storage, b: &Self::Storage) -> Self::Storage;
+
     fn exp(a: &Self::Storage) -> Self::Storage;
     fn log(a: &Self::Storage) -> Self::Storage;
     fn powf(a: &Self::Storage, p: f32) -> Self::Storage;
+    fn relu(a: &Self::Storage) -> Self::Storage;
+    fn lrelu(a: &Self::Storage, l: f32) -> Self::Storage;
+    fn clamp(a: &Self::Storage, min: f32, max: f32) -> Self::Storage;
+    fn tanh(a: &Self::Storage) -> Self::Storage;
+    fn sigmoid(a: &Self::Storage) -> Self::Storage;
+    fn softplus(a: &Self::Storage) -> Self::Storage;
 
     fn concat(a: &Self::Storage, b: &Self::Storage, axis: usize) -> Self::Storage;
     fn slice(a: &Self::Storage, slice: Vec<SliceAxis>) -> Self::Storage;
@@ -39,6 +44,10 @@ pub trait Backend: Clone + 'static {
 
     fn scatter_add(a: &mut Self::Storage, slice: Vec<SliceAxis>, b: &Self::Storage);
     fn eq(a: &Self::Storage, b: &Self::Storage) -> Self::Storage;
+    fn lt(a: &Self::Storage, t: f32) -> Self::Storage;
+    fn gt(a: &Self::Storage, t: f32) -> Self::Storage;
+    fn lte(a: &Self::Storage, t: f32) -> Self::Storage;
+    fn gte(a: &Self::Storage, t: f32) -> Self::Storage;
 }
 
 #[derive(Clone)]
@@ -53,6 +62,12 @@ pub enum Op<B: Backend> {
     Exp(Tensor<B>),
     Log(Tensor<B>),
     Powf(Tensor<B>, f32),
+    Relu(Tensor<B>),
+    LRelu(Tensor<B>, f32),
+    Clamp(Tensor<B>, f32, f32),
+    Tanh(Tensor<B>),
+    Sigmoid(Tensor<B>),
+    Softplus(Tensor<B>),
     Concat(Tensor<B>, Tensor<B>, usize),
     Slice(Tensor<B>, Vec<SliceAxis>),
     Reshape(Tensor<B>, Vec<usize>),
@@ -131,6 +146,48 @@ impl<B: Backend> Op<B> {
             Op::Powf(a, pow) => {
                 if let Some(a_op) = &a.0.op {
                     let grad = Tensor::scalar(pow - 1.) * a.powf(pow - 1.) * &grad;
+                    a_op.backward(grad);
+                }
+            }
+            Op::Relu(a) => {
+                if let Some(a_op) = &a.0.op {
+                    let grad = a.gt(0.) * grad;
+                    a_op.backward(grad);
+                }
+            }
+            Op::LRelu(a, l) => {
+                if let Some(a_op) = &a.0.op {
+                    let leak = a.lte(0.) * Tensor::scalar(*l);
+                    let grad = grad * leak;
+                    a_op.backward(grad);
+                }
+            }
+            Op::Clamp(a, min, max) => {
+                if let Some(a_op) = &a.0.op {
+                    let min = a.gt(*min);
+                    let max = a.lt(*max);
+                    let clamp = min * max;
+                    let grad = clamp * grad;
+                    a_op.backward(grad);
+                }
+            }
+            Op::Tanh(a) => {
+                if let Some(a_op) = &a.0.op {
+                    let tanh = a.tanh();
+                    let grad = Tensor::scalar(1.) - tanh.powf(2.);
+                    a_op.backward(grad);
+                }
+            }
+            Op::Sigmoid(a) => {
+                if let Some(a_op) = &a.0.op {
+                    let sigmoid = a.sigmoid();
+                    let grad = &sigmoid * (Tensor::scalar(1.) - &sigmoid);
+                    a_op.backward(grad);
+                }
+            }
+            Op::Softplus(a) => {
+                if let Some(a_op) = &a.0.op {
+                    let grad = a.sigmoid();
                     a_op.backward(grad);
                 }
             }
@@ -370,6 +427,48 @@ impl<B: Backend> Tensor<B> {
         )
     }
 
+    pub fn relu(&self) -> Tensor<B> {
+        Self::from_data_op(
+            B::relu(&self.0.data),
+            self.0.graph.then_some(Op::Relu(self.clone())),
+        )
+    }
+
+    pub fn lrelu(&self, l: f32) -> Tensor<B> {
+        Self::from_data_op(
+            B::lrelu(&self.0.data, l),
+            self.0.graph.then_some(Op::LRelu(self.clone(), l)),
+        )
+    }
+
+    pub fn clamp(&self, min: f32, max: f32) -> Tensor<B> {
+        Self::from_data_op(
+            B::clamp(&self.0.data, min, max),
+            self.0.graph.then_some(Op::Clamp(self.clone(), min, max)),
+        )
+    }
+
+    pub fn tanh(&self) -> Tensor<B> {
+        Self::from_data_op(
+            B::tanh(&self.0.data),
+            self.0.graph.then_some(Op::Tanh(self.clone())),
+        )
+    }
+
+    pub fn sigmoid(&self) -> Tensor<B> {
+        Self::from_data_op(
+            B::sigmoid(&self.0.data),
+            self.0.graph.then_some(Op::Sigmoid(self.clone())),
+        )
+    }
+
+    pub fn softplus(&self) -> Tensor<B> {
+        Self::from_data_op(
+            B::softplus(&self.0.data),
+            self.0.graph.then_some(Op::Softplus(self.clone())),
+        )
+    }
+
     pub fn concat(&self, rhs: &Tensor<B>, axis: usize) -> Tensor<B> {
         let op =
             (self.0.graph || rhs.0.graph).then_some(Op::Concat(self.clone(), rhs.clone(), axis));
@@ -461,6 +560,22 @@ impl<B: Backend> Tensor<B> {
 
     pub fn eq(&self, rhs: &Tensor<B>) -> Tensor<B> {
         Self::from_data_op(B::eq(&self.0.data, &rhs.0.data), None)
+    }
+
+    pub fn lt(&self, t: f32) -> Tensor<B> {
+        Self::from_data_op(B::lt(&self.0.data, t), None)
+    }
+
+    pub fn gt(&self, t: f32) -> Tensor<B> {
+        Self::from_data_op(B::gt(&self.0.data, t), None)
+    }
+
+    pub fn lte(&self, t: f32) -> Tensor<B> {
+        Self::from_data_op(B::lte(&self.0.data, t), None)
+    }
+
+    pub fn gte(&self, t: f32) -> Tensor<B> {
+        Self::from_data_op(B::gte(&self.0.data, t), None)
     }
 
     // diff
